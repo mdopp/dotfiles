@@ -52,7 +52,7 @@ Track progress at `.claude/state/autoloop-state.json` (shape in `state-template.
 ```bash
 gh issue list --repo <REPO_SLUG> --state open --limit 100 --json number,title,labels,body
 ```
-**Exclusion filter** (drop if any): labels include any of `<EXCLUDE_LABELS>`; number is in `state.completed/skipped/blocked`; body is clearly multi-PR ("audit"/"strategy"/"epic") → mark `blocked` reason `"needs scoping"`.
+**Exclusion filter** (drop if any): labels include any of `<EXCLUDE_LABELS>`; number is in `state.completed/skipped/blocked`; body is clearly multi-PR ("audit"/"strategy"/"epic") → mark `blocked` reason `"needs scoping"` — *or*, in a refine pass (track b) or when the user asks, **decompose** it into bite-sized child issues (see track b) and keep it open as the tracking umbrella.
 **Classification:**
 - **Security/sensitive gate** (`<SECURITY_SIGNAL>`) → open the code PR as **draft**, label the issue `autoloop-open`, add to `state.skipped[]` (`"security gate; draft PR #X awaiting review"`). Never merge.
 - **Normal flow** → code PR, merged after CI green (where CI applies) + path-mandated `/verify` green.
@@ -61,7 +61,7 @@ gh issue list --repo <REPO_SLUG> --state open --limit 100 --json number,title,la
 ### No eligible issues — choose a track
 Don't exit or blindly default. Decide:
 - **a) Hygiene / lint-sweep** — small, single-file cleanups; where a warning-count tool exists, drive it down (≤2 files, ≤120 LOC net per PR).
-- **b) Refine & unblock** — re-check `state.blocked[]` for items a recent merge made actionable; tighten thin issue bodies; then work the head.
+- **b) Refine & unblock** — re-check `state.blocked[]` for items a recent merge made actionable; tighten thin issue bodies; then work the head. **Decomposing an epic** is a first-class move here (better than parking it `needs scoping`): break a multi-PR issue into bite-sized child issues — each an independently-shippable PR-unit (foundations first, no dead-code stubs), **filed in dependency order so ascending issue number == dependency order** (the loop works ascending and skips a child whose `Depends on #N` is still open), each body giving deliverable + starting-point files + `Depends on #N`; comment the dependency DAG on the parent and keep the parent open as the tracking epic.
 - **c) Codebase evaluation** — run the standing eval prompt (below) against HEAD; file **Pragmatic** findings as issues (symptom-style); record **Academic** ones in `state.notes[]`.
 - **d) End-to-end validation** *(only if `<UPSTREAM_REPO>` ≠ none, or the project has a real runtime)* — run the full real-environment smoke; route failures cross-repo (see below).
 
@@ -80,6 +80,8 @@ Branch `fix/issue-<N>-<kebab>`. Read the issue + referenced files fully (+~50 li
 ## Step 3 — Local verification (each must pass before the next)
 Run `<LOCAL_GATES>`. Lint warnings allowed only if the count didn't increase. Diagnose test failures at the root — don't mock around or skip them.
 **Mandatory real-environment `/verify`** if the diff touches any of `<PATH_MANDATED_VERIFY>`: `<VERIFY_PROCEDURE>`. CI/type-check/tests verify code correctness, not feature correctness. If `/verify` fails → treat like CI-red (stop, post summary on the PR, leave open, move on) AND triage owner if `<UPSTREAM_REPO>` ≠ none (cross-repo routing below).
+
+**Narrow, deliberately-logged exception to the pre-merge `/verify`:** you MAY merge a path-mandated change on CI-green + a strong unit test and *defer* the real-env `/verify` ONLY when ALL hold — (1) the user explicitly prioritized it, or a dependent repo is blocked waiting on it; (2) the change adds **no new runtime logic** (reuses an already-tested, pre-existing path — removing a coercion, threading an existing-contract value, docs); (3) a test covers the new behaviour; (4) you document the deferral in the PR + `state`, with the real check to happen at the next natural opportunity. Absent that signal, default: path-mandated ⇒ `/verify` before merge. Never for a security-gated change. Logged judgement call, not a general loosening.
 
 <!-- Include this block only when <UPSTREAM_REPO> ≠ none -->
 ### Cross-repo issue routing (this repo vs <UPSTREAM_REPO>)
