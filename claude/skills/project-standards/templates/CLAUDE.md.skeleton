@@ -1,0 +1,50 @@
+# <PROJECT> — house rules
+
+<one-line project description; point to README for the full picture>
+
+These rules apply to every session, human or agent. Merge into an existing
+`CLAUDE.md` rather than clobbering it.
+
+## Commits
+
+- **Conventional Commits**: `type(scope): subject` — `feat`/`fix`/`refactor`/
+  `chore`/`docs`/`test`. Scope mirrors the path (`fix(<area>):`, …).
+- **No parentheses in the subject** beyond the conventional `(scope)`.
+  Why: a stray `(...)` token in a merged subject can make release tooling run
+  green but cut no release — silent breakage. Keep subjects paren-free.
+
+## Scope discipline
+
+- Smallest change that solves the task. A bug fix doesn't need surrounding
+  cleanup; a one-shot doesn't need a helper.
+- Three similar lines beat a premature abstraction. No speculative
+  error-handling, fallbacks, or feature flags for cases that can't happen.
+
+## Comments
+
+- Default to none. Add one only for a non-obvious *why* (a hidden constraint, a
+  workaround, a surprising invariant). Don't narrate *what* the code does.
+
+## Verify in the real environment
+
+- Type-check + tests prove code correctness, not **feature** correctness. For
+  <PATH-MANDATED CHANGES>, verify the change in <THE REAL APP/ENVIRONMENT>
+  before calling it done. If you can't, say so explicitly.
+
+## Never
+
+- Manually bump versions or hand-edit CHANGELOG / release manifest —
+  <RELEASE FLOW> owns that.
+- `--no-verify` / skip hooks. Fix the underlying failure instead.
+- Loosen an architecture invariant or lint baseline to make CI pass.
+
+## Local gates
+
+- Install hooks once: <HOOK INSTALL CMD>.
+- <LINT CMD>, <TEST CMD> before pushing.
+
+## Issues
+
+- Capture **symptom + repro + starting-point files** — not a fix-plan or
+  acceptance bullets. The fix is decided in the PR. Symptom-style issues age
+  well; fix-plan-heavy bodies rot.

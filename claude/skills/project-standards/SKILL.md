@@ -40,7 +40,7 @@ Write/update `.claude/standards.json`:
 {
   "standardsVersion": 1,
   "appliedAt": "<ISO date>",
-  "applied": { "conventional-commits": 1, "ci": 1, "pre-commit-hooks": 1, "release-please": 1, "arch-ratchet": 1, "autoloop-issues": 1, "claude-md": 1, "issue-hygiene": 1 },
+  "applied": { "conventional-commits": 1, "ci": 1, "pre-commit-hooks": 1, "release-please": 1, "arch-ratchet": 1, "autoloop-issues": 2, "claude-md": 1, "issue-hygiene": 1 },
   "stack": ["node-ts", "python"],
   "notes": []
 }
@@ -51,7 +51,9 @@ This record is what makes "extend over the lifetime" work: on a later run, compa
 
 ---
 
-## Catalog (CATALOG_VERSION = 1)
+## Catalog (CATALOG_VERSION = 2)
+
+> v2: catalog #6 (autoloop-issues) rewritten from a single-file skill into a multi-agent **pipeline bundle** (`templates/autoloop/`) — orchestrator + Planner/Builder/Verify stages + shared work-queue, with the fast-per-issue / full-per-batch gate split and a `needs_refinement[]` human worklist. Existing projects on `autoloop-issues: 1` should be offered the upgrade.
 
 Each standard records the **ServiceBay learning** behind it so future-you can judge edge cases.
 
@@ -87,16 +89,16 @@ Each standard records the **ServiceBay learning** behind it so future-you can ju
 **ServiceBay learning:** `scripts/check-invariants.ts` + `.dependency-cruiser.cjs` gate cross-layer imports; when an exemption is resolved, ratchet it tighter. Reviews run the rubric first — "all green" is a valid result; don't invent findings beyond the documented invariants.
 **Apply:** only where it earns its keep (layered codebases). Node → `dependency-cruiser` config + an `npm run check:arch`. Python → import-linter. Start permissive, tighten as the codebase allows. Skip for small/flat repos.
 
-### 6. autoloop-issues skill (latest standard)
-**What:** install a **project-tailored** copy of the autoloop-issues skill into the repo's `.claude/skills/autoloop-issues/` from the bundled generic template, with the latest standards baked in.
+### 6. autoloop-issues pipeline (latest standard)
+**What:** install a **project-tailored multi-agent autoloop pipeline** into the repo's `.claude/skills/autoloop-issues/` from the bundled generic template directory. The skill is an **orchestrator** that spawns a fresh sub-agent per stage (Planner → Builder → Verify) coordinated through a shared `.claude/state/work-queue.json`, so the long-lived loop session stays clean and each stage reasons in fresh context.
 **ServiceBay learning (the "latest standards" the template encodes):**
-- ≤8 PRs/invocation; resumable `.claude/state/autoloop-state.json`; 8-minute wakeup cap in `/loop` mode.
-- Issue selection with an exclusion filter + classification; **security/sensitive issues open as draft** and wait for human review.
-- Local gates (lint/typecheck/test/arch) **then** real-environment **`/verify`** for path-mandated changes — code correctness ≠ feature correctness.
-- Manual merge gate when `main` is unprotected (`--auto` no-ops).
-- **No-eligible-issues three/four-track decision**: (a) hygiene/lint-sweep, (b) refine & unblock, (c) codebase evaluation (files Pragmatic findings as issues to refill the queue), and — for repos that depend on another — (d) end-to-end validation + **cross-repo issue routing** (file platform bugs upstream, mark the local issue blocked-waiting, wait).
-- release-please preflight (merge the open release PR first) where release-please is used.
-**Apply:** copy `templates/autoloop-issues.template.md` → `<repo>/.claude/skills/autoloop-issues/SKILL.md`, then **fill every `<PLACEHOLDER>`** by interview/detection (see the placeholder key at the top of the template): repo slug, labels, local gate commands, path-mandated `/verify` list, verify procedure (and box/host if any), release flow, upstream repo (if dependent). Also stamp `USAGE.md` and `state-template.json`. Reference the live ServiceBay copy (`mdopp/servicebay`) and OSCAR copy (`mdopp/oscar`) as worked examples.
+- **Pipeline, not monolith.** Orchestrator dispatches one stage/tick; stages hand off only through `work-queue.json`; the loop session accumulates only one-line summaries. Each stage runs at a model matched to the cost of being wrong (builder=opus for code / haiku for lint sweeps; planner & verify=sonnet).
+- **Human attention goes to one queue: `needs_refinement[]`.** The Planner refuses to guess past ambiguity — it bounces each underspecified issue there with a *specific* question. The pipeline runs everything downstream autonomously.
+- **Batch economy + the gate split.** The expensive pipeline (full suite, CI, release, `/verify`) runs **once per batch (≤`<BATCH_SIZE>` issues on one persistent branch), never per issue.** Per-issue gates are **fast** — lint + arch + *changed-tests only* (e.g. `vitest --changed` / `pytest --picked`); the **full** suite runs only at the batch seal. (Rationale: arch + transitive changed-tests catch the common regressions cheaply; the full run is the seal safety-net; in-session atomic commits make a red full-run a cheap bisect.)
+- **Security/sensitive issues run the full loop** and are flagged (`security:true` → `review[]`) for **post-deploy** review, not blocked pre-merge (a project can opt back into a pre-merge draft gate — see `templates/autoloop/stages/builder.md`); external-commenter tickets parked on `awaiting_user[]`, never auto-replied.
+- Real-environment **`/verify`** for path-mandated changes is its own batched stage gating the release; manual merge gate when `main` is unprotected; release-please preflight merges the open release PR first.
+- **No-eligible-issues tracks** (Planner): (a) lint-sweep units, (b) refine & unblock, (c) codebase evaluation refills the queue, and — for dependent repos — (d) end-to-end validation + **cross-repo issue routing** (file platform bugs upstream, mark local issue blocked-waiting, wait).
+**Apply:** copy the whole `templates/autoloop/` directory → `<repo>/.claude/skills/autoloop-issues/` (so it lands as `SKILL.md`, `USAGE.md`, `work-queue-template.json`, and `stages/{planner,builder,verify}.md`), then **fill every `<PLACEHOLDER>`** across all files by interview/detection (key at the top of `autoloop/SKILL.md`): repo slug, batch size, labels, **fast vs full gate commands** (split the test suite into a changed-tests run and a full run), path-mandated `/verify` list, verify procedure + staging mechanism, release flow, upstream repo (if dependent), per-stage models. Uncomment the `<UPSTREAM_REPO>`-gated blocks only for dependent repos. Reference the live ServiceBay copy (`mdopp/servicebay`) as the worked example.
 
 ### 7. CLAUDE.md conventions
 **What:** a `CLAUDE.md` capturing the house rules so every session (human or agent) follows them.
@@ -111,7 +113,7 @@ Each standard records the **ServiceBay learning** behind it so future-you can ju
 
 ## Bundled templates (`templates/`)
 
-- `autoloop-issues.template.md` — the generic, placeholdered autoloop skill (catalog #6). **The most important deliverable** — it's the "autoloop with the latest standards" to stamp into any repo.
+- `autoloop/` — the generic, placeholdered autoloop **pipeline bundle** (catalog #6): `SKILL.md` (orchestrator), `USAGE.md`, `work-queue-template.json`, and `stages/{planner,builder,verify}.md`. **The most important deliverable** — copy the whole dir into a repo's `.claude/skills/autoloop-issues/` and fill the placeholders.
 - (Create the smaller snippets — `ci-node.yml`, `ci-python.yml`, `release-please.yml`, `hooks-node.md`, `hooks-python.md`, `commitlint.md`, `CLAUDE.md.skeleton` — on first use from the inline descriptions in the catalog if they don't yet exist, and keep them here so future runs reuse them. Bumping a template ⇒ bump `CATALOG_VERSION` so existing projects get an upgrade prompt.)
 
 ## Things this skill does NOT do
