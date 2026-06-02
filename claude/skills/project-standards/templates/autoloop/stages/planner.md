@@ -51,6 +51,13 @@ Don't exit; don't blindly default to lint.
 
 **Autonomous default order:** <!-- (d) if runtime artifacts merged since last_e2e; --> (b) if `blocked[]` non-empty; else (c) if no eval in last ~5 firings; else (a). Record the choice in `notes[]`.
 
+## Step 6 — Reconcile the label mirror (one-way: file → labels)
+The queue file is the source of truth; mirror two human-facing lists onto GitHub issue labels so a human browsing the repo sees the same worklist (the orchestrator mirrors the third, `verify_state`, onto the release PR):
+- Every issue in `blocked[]` → ensure label `autoloop:blocked`; remove it from any issue no longer in `blocked[]`.
+- Every issue in `needs_refinement[]` → ensure label `autoloop:needs-refinement`; remove it from any issue no longer there.
+
+Derive labels **from the file every run** — never read a label back into the file. Drift is cosmetic and self-heals next run. Create the labels once if missing (`gh label create`).
+
 ### Codebase-evaluation prompt (track c — run verbatim against HEAD)
 ```
 Evaluate the <REPO_SLUG> codebase across its core areas. Assume a solid, production-ready baseline; skip generic style complaints unless they have measurable impact on bugs or velocity.

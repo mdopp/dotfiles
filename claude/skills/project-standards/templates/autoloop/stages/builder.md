@@ -24,6 +24,8 @@ Rationale: the architecture/lint check (global, fast) catches structure breakage
 
 Set the unit `status:"in_progress"`, `in_progress` to the unit id.
 
+**Build-ahead is safe during a background Verify.** A prior batch may be in `verify_state` `verifying`/`owed` while you build the next one — that's expected. Building writes neither `<MAIN_BRANCH>` nor the verify env, so it overlaps the background Verify safely. You only ever build here; **sealing** is what waits for the verify to clear (the orchestrator gates that, not you).
+
 ### 2. Read the unit
 - **Cluster** → read *every* member issue + its referenced files; implement all members as one coherent themed change (organize the diff by theme, not by issue).
 - **Issue** → read the body, referenced files, ~50 lines around any line ref.
@@ -52,7 +54,7 @@ Implement the one file/rule named. Size guard: ≤2 source files (+ tests), ≤1
 
 ## Mode: `seal` — ship the accumulated batch (expensive pipeline, once)
 
-Precondition (re-assert): `batch.count >= <BATCH_SIZE>` **or** `queue[]` has no `planned` unit. Else you're mid-batch — do nothing, return "not ready to seal".
+Precondition (re-assert): (`batch.count >= <BATCH_SIZE>` **or** `queue[]` has no `planned` unit) **and** `verify_state.status` is clear (`green`/`null`, not `owed`/`verifying`/`red`). Mid-batch, or a prior batch still in verify → do nothing, return "not ready to seal" (the orchestrator only dispatches you in `seal` mode when both hold, but re-assert in case the queue moved).
 
 ### 1. Full gate
 ```bash
@@ -68,7 +70,7 @@ A full-suite failure the changed-tests runs missed → identify the culprit comm
 `gh pr checks <PR#> --watch` (scope: `<CI_SCOPE>`). Green → `gh pr merge <PR#> --merge --delete-branch`, then `git checkout <MAIN_BRANCH> && git pull --ff-only`. Red twice on the same SHA → post the failing-job link, leave open, return (orchestrator hard-exit #1).
 
 ### 4. Hand off to Verify
-If **any** merged file is in `<PATH_MANDATED_VERIFY>`, set `verify_state={sha:"<merge SHA>", status:"owed", detail:"<which paths>", since:<now>}` — the orchestrator dispatches Verify next; the release stays blocked until green. Move the batch's units → `completed[]`, mark `lint_sweep[]`, append `{issue, pr, flag:"security", merged_at}` to `review[]` for every shipped `security:true` unit, and **reset `batch` to `null`**. (The release PR itself is merged by the orchestrator preflight *after* Verify is green — not here.)
+If **any** merged file is in `<PATH_MANDATED_VERIFY>`, set `verify_state={sha:"<merge SHA>", status:"owed", detail:"<which paths + a concrete /verify checklist>", since:<now>}` — the orchestrator launches Verify **in the background** next firing (it flips `owed`→`verifying`); the release stays blocked until green. Move the batch's units → `completed[]`, mark `lint_sweep[]`, append `{issue, pr, flag:"security", merged_at}` to `review[]` for every shipped `security:true` unit, and **reset `batch` to `null`**. (The release PR itself is merged by the orchestrator preflight *after* Verify is green — not here.) You only ever set `verify_state` to `owed`; the `verifying`/`green`/`red` transitions are written by the orchestrator (from the background agent's result file), never by you.
 
 ### Path-mandated paths (trigger `verify_state=owed`)
 ```
