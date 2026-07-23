@@ -72,7 +72,8 @@ Key fields:
 - `review[]` — **the human's post-deploy review list**: `{issue, pr, flag, merged_at}` for shipped `security:true` (and other sensitive) changes. Informational, **not** a merge gate. (A project that prefers *pre-merge* review for security can instead keep these as draft PRs — see the note in `stages/builder.md`.)
 - `verify_state` — `{sha, status: "owed"|"verifying"|"red"|"green", detail, since}`. Gates the release. State machine: `owed` (path-mandated change merged, not yet verified) → `verifying` (a background Verify agent is in flight) → `green`|`red`. You set `verifying` when you launch the background agent; the agent writes its verdict to `.claude/state/verify-result.json` (**its own file, not the shared queue** — avoids a write-race with the concurrent builder), and you fold that verdict back into this field at preflight. A `verifying` entry whose `since` is >20 min old with no result file = the agent died → reset to `owed` (it relaunches).
 - `blocked[]` — parked work, each `{issue, blocked_by, reason, since}` where `blocked_by` is a **machine-checkable unblock condition** (`"#<N>"` dependency · `"capability:<x>"` · `"decomposition"` · `"epic"`) the planner rechecks every run.
-- `completed[]`, `lint_sweep[]`, `release_warnings[]`, `last_codebase_eval`, `notes[]`. <!-- + upstream_waits[], last_e2e when <UPSTREAM_REPO> ≠ none -->
+- `completed[]`, `notes[]` — **bounded caches, not ledgers** (see *State hygiene* below). The durable record of shipped work is GitHub (closed issues + merged PRs) + git history; these hold only a short rolling window for the loop's own context, and are re-read in full by every stage — so never let them grow unbounded.
+- `lint_sweep[]`, `release_warnings[]`, `last_codebase_eval`. <!-- + upstream_waits[], last_e2e when <UPSTREAM_REPO> ≠ none -->
 
 **Label mirror (one-way projection).** The queue file is the source of truth; three human-facing states are *mirrored* to GitHub labels so a human sees the same worklist: `blocked[]` → `autoloop:blocked`, `needs_refinement[]` → `autoloop:needs-refinement` (both reconciled by the **planner**), and `verify_state` → `autoloop:verify-pending`/`-failed` on the **release PR** (set here in preflight). Labels are derived from the file every run — never the reverse — so drift is cosmetic and self-heals.
 
@@ -89,7 +90,7 @@ The builder enforces the per-issue side (fast gates only, commit to the batch br
 1. **Working tree clean?** `git status --porcelain`. Dirty → exit (another session owns this tree). Don't stash/switch.
 2. **On `<MAIN_BRANCH>`, current?** `git fetch origin && git checkout <MAIN_BRANCH> && git pull --ff-only`. FF fails → exit + report.
 3. **Lock check.** `.claude/state/autoloop.lock` mtime < 10 min ⇒ another firing is running → exit. Else touch it.
-4. **Read the work queue.** Create from `work-queue-template.json` if absent. Seed `started`/`last_invocation`.
+4. **Read the work queue.** Create from `work-queue-template.json` if absent. Seed `started`/`last_invocation`. Then **prune bounded state** (see *State hygiene* below — trim `completed[]`/`notes[]`, drop closed-issue notes) so the file stays token-cheap; you are the single writer, so preflight is the place to do it.
 5. **Fold in any background Verify result.** If `.claude/state/verify-result.json` exists, the background agent finished: copy its `{sha, status, detail, verified_at}` into `verify_state` (you are the single writer of the shared queue's `verify_state`), then **delete the result file**. If `verify_state.status == "verifying"` but no result file exists and `since` is >20 min old, the agent died — reset `verify_state.status` to `"owed"` so it relaunches.
 6. **Release gate** (`<RELEASE_FLOW>`):
    - release-please → `gh pr list --head <release-branch> --state open`. If open:
@@ -160,6 +161,16 @@ Pass the same `/loop /autoloop-issues` input back. Don't nap between dispatches 
 ## Comment hygiene
 
 Every comment any stage posts is attributable as agent-authored per the project's convention (an AI marker if the agent posts as a human account), and stays short and sharp. **No stage ever replies to an external human commenter** — those tickets are parked on `awaiting_user[]` for a human-confirmed reply.
+
+## State hygiene (bounded queue — keep it token-cheap)
+
+Every stage re-reads `work-queue.json` **in full**, so its size is a per-tick token cost. The queue is a **bounded orchestration cache, never a ledger** — the durable record of the work already lives in GitHub (open/closed issues, labels, merged PRs) and git history. At preflight (single writer), enforce:
+- `completed[]` — keep only the **last released batch's** units; drop older. To see everything ever shipped, read closed issues / merged PRs, not this file.
+- `notes[]` — **run-scoped scratch**, cap ~15 entries and drop any note whose subject issue is closed. It records *why the loop did X this run*, not project history; keep each note one terse line.
+- `release_warnings[]` — clear on release.
+- Never embed the schema or long prose (`_comment`) in the live file — the schema lives in `work-queue-template.json`.
+
+This is also **why the queue is a local file and not a GitHub artifact**: it holds rich in-flight orchestration (issue clustering, the batch branch, the verify state-machine) that GitHub issues can't model without many API calls and two-way-sync races. The parts that *are* durable are projected to labels one-way (above) and otherwise left to GitHub — so the file can stay small and cheap to re-read.
 
 ## End-of-firing summary
 
