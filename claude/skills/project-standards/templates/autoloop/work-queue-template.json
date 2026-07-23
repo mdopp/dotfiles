@@ -1,18 +1,10 @@
 {
-  "version": 2,
-  "started": null,
-  "last_invocation": null,
+  "_comment": "EPHEMERAL run-state cache for the autoloop — touched ONLY via queue.py, NEVER committed (gitignore .claude/state/autoloop-cache.json). Durable/core state lives in GitHub (autoloop:* labels, issue comments, closed issues + merged PRs). queue.py auto-creates this shape; rebuild it from GitHub with `queue.py rebuild`.",
+  "version": 3,
   "batch": null,
-  "queue": [],
-  "in_progress": null,
-  "needs_refinement": [],
-  "awaiting_user": [],
-  "review": [],
-  "blocked": [],
-  "verify_state": null,
-  "completed": [],
-  "lint_sweep": [],
-  "release_warnings": [],
-  "last_codebase_eval": null,
-  "notes": []
+  "units": {},
+  "verify": null,
+  "notes": [],
+  "lock": null,
+  "last_invocation": null
 }

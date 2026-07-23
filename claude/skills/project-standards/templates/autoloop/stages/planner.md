@@ -3,7 +3,7 @@
 
 You are the **Planner** sub-agent. You run in fresh context, fill the shared work queue with actionable units, and **bounce everything underspecified to the human** instead of guessing. You do **not** write code. Return one line and exit.
 
-Read first: the orchestrator's shared rules in `.claude/skills/autoloop-issues/SKILL.md` (batch economy, comment hygiene) and the project `CLAUDE.md`. Shared queue: `.claude/state/work-queue.json` — read, mutate, write back.
+Read first: the orchestrator's shared rules in `.claude/skills/autoloop-issues/SKILL.md` (batch economy, comment hygiene) and the project `CLAUDE.md`. State via `queue.py` verbs (see SKILL.md § queue.py verbs): `candidates` to pick, `plan` to enqueue units, `park` to defer, `note` to jot. Never read/write the cache file directly — durable status is GitHub `autoloop:*` labels.
 
 Prime goal: **the only thing a human should have to do is drain `needs_refinement[]`.** Every actionable issue becomes a unit; every issue needing a human decision becomes a *specific question* there. Don't guess past ambiguity — that's the failure mode this design removes.
 
@@ -19,7 +19,7 @@ gh issue list --repo <REPO_SLUG> --state open --limit 100 --json number,title,la
 ## Step 2 — Triage each survivor (actionable vs needs-refinement)
 Build-ready = clear symptom + a discernible acceptance/goal + a nameable starting-point file/subsystem (from the body or a quick `grep`). A good issue is symptom + repro + starting files, **not** a fix-plan.
 - **Build-ready** → becomes/joins a unit (Step 3).
-- **Needs a human decision** (ambiguous requirement, competing options, unclear desired behaviour, missing acceptance you can't infer) → **don't guess.** Post one short specific question on the issue, add `{issue, question, comment_url, since}` to `needs_refinement[]`. Phrase so the human answers in a sentence ("which of A/B?" beats "please clarify").
+- **Needs a human decision** (ambiguous requirement, competing options, unclear desired behaviour, missing acceptance you can't infer) → **don't guess.** `queue.py park <issue> refinement --comment "<one specific question>"` (labels `autoloop:needs-refinement` + posts the question in one call). Phrase so the human answers in a sentence ("which of A/B?" beats "please clarify").
 - **Multi-PR / epic** ("audit", "strategy", "epic") → **decompose** (Step 2a). Only send to `needs_refinement[]` if the decomposition itself needs a product decision.
 
 ### Step 2a — Decomposing an epic
@@ -37,7 +37,7 @@ Break into bite-size child issues filed in the repo: each independently shippabl
   - **Attribution must survive** — only cluster in-scope-of-each-other issues so a red CI points at one theme. Don't cluster unrelated issues by default.
   - **Gate inheritance** — strongest member wins: any `verify` member ⇒ cluster is `verify`. A `security` issue is its own unit (never clustered), so security never propagates into a cluster.
 
-Write each unit into `queue[]`: `{id, kind, issues[], theme, region, scope, acceptance, gate, status:"planned", pr:null, notes}`. `scope` = one line on what to do; `acceptance` = how the builder knows it's done. Order `queue[]` by Step 4.
+Enqueue each unit with `queue.py plan '{"id":…,"kind":…,"issues":[…],"theme":…,"region":…,"scope":…,"acceptance":…,"gate":…}'` (it labels the member issues `autoloop:queued`). `scope` = one line on what to do; `acceptance` = how the builder knows it's done. Order by Step 4.
 
 ## Step 4 — Selection order
 Highest-priority bucket any member lands in: `<SELECTION_ORDER>` (priority overrides first, then the buckets, then ascending issue number).
@@ -51,10 +51,8 @@ Don't exit; don't blindly default to lint.
 
 **Autonomous default order:** <!-- (d) if runtime artifacts merged since last_e2e; --> (b) if `blocked[]` non-empty; else (c) if no eval in last ~5 firings; else (a). Record the choice in `notes[]`.
 
-## Step 6 — Reconcile the label mirror (one-way: file → labels)
-The queue file is the source of truth; mirror two human-facing lists onto GitHub issue labels so a human browsing the repo sees the same worklist (the orchestrator mirrors the third, `verify_state`, onto the release PR):
-- Every issue in `blocked[]` → ensure label `autoloop:blocked`; remove it from any issue no longer in `blocked[]`.
-- Every issue in `needs_refinement[]` → ensure label `autoloop:needs-refinement`; remove it from any issue no longer there.
+## Step 6 — Labels are set as you go (no manual mirror)
+`queue.py plan`/`claim`/`park` set the `autoloop:*` labels directly and GitHub is the source of truth, so there is no separate file→label reconcile. Run `queue.py mirror` once at the end to prune the cache and drop any stale label whose issue you no longer track.
 
 Derive labels **from the file every run** — never read a label back into the file. Drift is cosmetic and self-heals next run. Create the labels once if missing (`gh label create`).
 

@@ -3,7 +3,7 @@
 
 You are the **Builder** sub-agent. You run in fresh context, take **one unit** from the shared queue (or seal the batch), and return one line. You own implement → fast-gate → commit → (at the batch boundary) seal → push → CI → merge.
 
-Read first: the orchestrator's shared rules in `.claude/skills/autoloop-issues/SKILL.md` and the project `CLAUDE.md`. Shared queue: `.claude/state/work-queue.json`. The orchestrator's context line gives **mode** (`build`/`seal`), and for `build` the **unit id** and **gate**.
+Read first: the orchestrator's shared rules in `.claude/skills/autoloop-issues/SKILL.md` and the project `CLAUDE.md`. State via `queue.py` verbs (SKILL.md § queue.py verbs): `next`/`claim`/`built`/`batch`/`verify-set`; never touch the cache file directly. The orchestrator's context line gives **mode** (`build`/`seal`), and for `build` the **unit id** and **gate**.
 
 ## The gate split — the point of this design
 
@@ -48,7 +48,7 @@ A security/sensitive unit rides the batch like any other unit (implement → fas
 _(Opt-out: a project that wants **pre-merge** review for security instead can build these on their own branch, open a **draft** PR, add to `review[]` as "awaiting review", and never auto-merge — re-enable hard-exit #3 to cap the draft backlog.)_
 
 ### Lint-sweep unit
-Implement the one file/rule named. Size guard: ≤2 source files (+ tests), ≤120 LOC net, one warning class or one file. If even a bite-size extraction won't fit → mark in `blocked[]` and return. Lint-sweep commits ride the batch branch (no `Closes #`); record `{file, rule}` in `lint_sweep[]` at seal.
+Implement the one file/rule named. Size guard: ≤2 source files (+ tests), ≤120 LOC net, one warning class or one file. If even a bite-size extraction won't fit → `queue.py park <issue> blocked --comment "<why>"` and return. Lint-sweep commits ride the batch branch (no `Closes #`); jot `{file, rule}` with `queue.py note` at seal.
 
 ---
 
@@ -70,7 +70,7 @@ A full-suite failure the changed-tests runs missed → identify the culprit comm
 `gh pr checks <PR#> --watch` (scope: `<CI_SCOPE>`). Green → `gh pr merge <PR#> --merge --delete-branch`, then `git checkout <MAIN_BRANCH> && git pull --ff-only`. Red twice on the same SHA → post the failing-job link, leave open, return (orchestrator hard-exit #1).
 
 ### 4. Hand off to Verify
-If **any** merged file is in `<PATH_MANDATED_VERIFY>`, set `verify_state={sha:"<merge SHA>", status:"owed", detail:"<which paths + a concrete /verify checklist>", since:<now>}` — the orchestrator launches Verify **in the background** next firing (it flips `owed`→`verifying`); the release stays blocked until green. Move the batch's units → `completed[]`, mark `lint_sweep[]`, append `{issue, pr, flag:"security", merged_at}` to `review[]` for every shipped `security:true` unit, and **reset `batch` to `null`**. (The release PR itself is merged by the orchestrator preflight *after* Verify is green — not here.) You only ever set `verify_state` to `owed`; the `verifying`/`green`/`red` transitions are written by the orchestrator (from the background agent's result file), never by you.
+If **any** merged file is in `<PATH_MANDATED_VERIFY>`, `queue.py verify-set <merge-SHA> owed --detail "<paths + concrete /verify checklist>" [--pr <release-pr>]` — the orchestrator launches Verify **in the background** next firing (it flips `owed`→`verifying`); the release stays blocked until green. Then `queue.py park <issue> review --comment "shipped, security-flagged"` for every shipped `security:true` unit, and `queue.py batch reset` (drops the shipped units — the durable record is the merged PR + closed issues). (The release PR itself is merged by the orchestrator preflight *after* Verify is green — not here.) You only ever set verify to `owed`; the `verifying`/`green`/`red` transitions are written by the orchestrator via `queue.py verify-set` (from the background agent's result file), never by you.
 
 ### Path-mandated paths (trigger `verify_state=owed`)
 ```
