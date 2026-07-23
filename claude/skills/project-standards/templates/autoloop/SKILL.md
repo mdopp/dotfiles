@@ -1,6 +1,6 @@
 ---
 name: autoloop-issues
-description: Orchestrates an autonomous issue-resolution pipeline for <REPO_SLUG> — Planner → Builder → Verify — coordinated through a shared work queue, spawning each stage as a fresh sub-agent so the loop session stays clean. Verify runs in the BACKGROUND (writes its own result file) so the builder keeps build-ahead-ing the next batch while a prior batch is verified; only the seal→release critical section serializes. Fast per-issue gates, expensive pipeline (CI + release + real-environment /verify) once per batch. Security/sensitive issues run the full loop too and are flagged in the deployed list for post-deploy review. Resumable via .claude/state/work-queue.json. Use when the user asks to "burn down the backlog", "work the issues autonomously", or invokes /loop with this skill.
+description: Orchestrates an autonomous issue-resolution pipeline for <REPO_SLUG> — Planner → Builder → Verify — coordinated through a shared work queue, spawning each stage as a fresh sub-agent so the loop session stays clean. Verify runs in the BACKGROUND (writes its own result file) so the builder keeps build-ahead-ing the next batch while a prior batch is verified; only the seal→release critical section serializes. Fast per-issue gates, expensive pipeline (CI + release + real-environment /verify) once per batch. Security/sensitive issues run the full loop too and are flagged in the deployed list for post-deploy review. Core state lives in GitHub (labels/issues/PRs); a tiny gitignored cache holds only in-flight run state, brokered by queue.py and rebuildable from GitHub. Use when the user asks to "burn down the backlog", "work the issues autonomously", or invokes /loop with this skill.
 ---
 
 <!--
@@ -37,7 +37,7 @@ PLACEHOLDER KEY (shared across this file + stages/*.md)
 
 # Autoloop orchestrator — <REPO_SLUG>
 
-You are the **coordinator** of an autonomous issue-resolution pipeline. You do **not** write code, groom issues, or verify the environment yourself — you run a tight dispatch loop that **spawns a fresh sub-agent per stage** and routes work between them through one shared file, `.claude/state/work-queue.json`.
+You are the **coordinator** of an autonomous issue-resolution pipeline. You do **not** write code, groom issues, or verify the environment yourself — you run a tight dispatch loop that **spawns a fresh sub-agent per stage** and routes work between them through the `queue.py` state broker (durable state in GitHub, a tiny gitignored local cache for in-flight run state).
 
 Why this shape: each sub-agent starts cold and returns only a one-line summary, so the long-lived loop session stays small and every stage reasons in clean context. The pipeline is built so **human attention goes to one place: refining issues** (`needs_refinement[]`). Everything downstream — grouping, building, verifying — runs without you.
 
@@ -60,21 +60,36 @@ Why this shape: each sub-agent starts cold and returns only a one-line summary, 
 
 Any project `CLAUDE.md` or user memory overrides this skill on conflict. Read them before the first iteration of a fresh `/loop` run.
 
-## The shared work queue (the only handoff)
+## State — GitHub is the source of truth; `queue.py` brokers a tiny local cache
 
-`.claude/state/work-queue.json` is the single source of truth between stages. Stage agents read it, do their work, **write results back into it**, and return one line. You re-read it after every spawn. Schema in `work-queue-template.json` (same dir); create from it if absent.
+State lives in **two tiers, split by durability**, and **no stage ever reads a big JSON blob into context** — every stage calls `queue.py` verbs and gets back only the slice it needs. The old fat `work-queue.json` (re-read in full each tick, unbounded, unsafe under concurrent instances) is gone.
 
-Key fields:
-- `queue[]` — **units** the builder consumes, in selection order. A unit is `{id, kind: "cluster"|"issue"|"lint-sweep", issues[], theme, region, scope, acceptance, gate: "normal"|"verify", security: false, status: "planned"|"in_progress"|"built"|"blocked", pr, notes}`. A cluster is the work-unit; its members never appear standalone. `gate` is the verification level; `security: true` flags a sensitive change for **post-deploy** review — it does **not** block the merge.
-- `batch` — the persistent integration branch: `{branch, units[], count, sealed}`. **Survives across firings.** Reset to `null` after its release/merge completes.
-- `needs_refinement[]` — **the human's worklist.** `{issue, question, comment_url, since}`. The planner parks anything it can't make actionable without a human decision here, with the *specific* question.
-- `awaiting_user[]` — external human comment unanswered; a `/comment-responder`-style reply-with-confirm job, never the pipeline's.
-- `review[]` — **the human's post-deploy review list**: `{issue, pr, flag, merged_at}` for shipped `security:true` (and other sensitive) changes. Informational, **not** a merge gate. (A project that prefers *pre-merge* review for security can instead keep these as draft PRs — see the note in `stages/builder.md`.)
-- `verify_state` — `{sha, status: "owed"|"verifying"|"red"|"green", detail, since}`. Gates the release. State machine: `owed` (path-mandated change merged, not yet verified) → `verifying` (a background Verify agent is in flight) → `green`|`red`. You set `verifying` when you launch the background agent; the agent writes its verdict to `.claude/state/verify-result.json` (**its own file, not the shared queue** — avoids a write-race with the concurrent builder), and you fold that verdict back into this field at preflight. A `verifying` entry whose `since` is >20 min old with no result file = the agent died → reset to `owed` (it relaunches).
-- `blocked[]` — parked work, each `{issue, blocked_by, reason, since}` where `blocked_by` is a **machine-checkable unblock condition** (`"#<N>"` dependency · `"capability:<x>"` · `"decomposition"` · `"epic"`) the planner rechecks every run.
-- `completed[]`, `lint_sweep[]`, `release_warnings[]`, `last_codebase_eval`, `notes[]`. <!-- + upstream_waits[], last_e2e when <UPSTREAM_REPO> ≠ none -->
+**DURABLE / core state → GitHub (the source of truth).** Issue open/closed, work status as `autoloop:*` labels, human questions/links as issue comments, completion as closed-issue + merged-PR. This survives across firings, machines, and **concurrent loop instances**: the `autoloop:building` label is the **cross-instance claim**, so two instances never grab the same issue. Labels: `queued` (planned) · `building` (claimed) · `blocked` · `needs-refinement` · `review` (sensitive change, post-merge) · `device-test` · `upstream-wait` · `verify-pending`/`verify-failed` (on the release PR). Ensure these labels exist in the repo once (`gh label create`).
 
-**Label mirror (one-way projection).** The queue file is the source of truth; three human-facing states are *mirrored* to GitHub labels so a human sees the same worklist: `blocked[]` → `autoloop:blocked`, `needs_refinement[]` → `autoloop:needs-refinement` (both reconciled by the **planner**), and `verify_state` → `autoloop:verify-pending`/`-failed` on the **release PR** (set here in preflight). Labels are derived from the file every run — never the reverse — so drift is cosmetic and self-heals.
+**EPHEMERAL run state → a tiny local cache** (`.claude/state/autoloop-cache.json`, **gitignored**, touched only through `queue.py`): the in-flight `batch` (branch/count/unit_ids), the current unit **plan** (this run's clustering — `{id, kind, issues[], theme, region, scope, acceptance, gate, security, status, pr}`), the `verify` state-machine (`owed→verifying→green|red`, sha, since), and a bounded `notes` ring. It holds only what GitHub can't cheaply model; it's a few KB, never committed, and **rebuildable from GitHub** (`queue.py rebuild`) — so losing it is safe and it is never the source of truth.
+
+`queue.py` enforces caps, pruning, one-way label projection, and the cross-instance claim **in code** — not in prose a model must remember. `security: true` on a unit flags a sensitive change (carried by the `autoloop:review` label); it does **not** block the merge.
+
+### `queue.py` verbs — the only way stages touch state
+
+Run `python3 .claude/skills/autoloop-issues/queue.py <verb>` (add `--offline` to skip gh in tests; `--repo owner/repo` to override the origin). Covered by `queue.py selftest`.
+
+| Verb | Who | Does |
+|---|---|---|
+| `summary` | orchestrator | compact status (batch, verify, gh label counts) — the preflight peek |
+| `candidates [--order L,…] [--exclude L,…]` | planner | open, unclaimed issues in priority order |
+| `plan '<unit-json>'` | planner | record a planned unit + label its issues `autoloop:queued` |
+| `next` | builder | the next planned unit to build |
+| `claim <id>` | builder | **cross-instance claim** (`autoloop:building`) before building |
+| `built <id> [--pr N]` | builder | mark the unit built onto the batch |
+| `batch new\|seal\|reset [--branch …]` | builder/orch | batch lifecycle (`reset` drops the shipped units) |
+| `verify-set <sha> <status> [--pr N]` | builder/orch | set verify state + mirror the release-PR label |
+| `verify-get` | orchestrator | read verify state (auto-resets a dead `verifying`) |
+| `park <issue> <blocked\|refinement\|review\|device-test\|upstream-wait> [--comment …]` | planner | durably park to GitHub (label + comment) |
+| `note "<one line>"` | any | append to the bounded run-scoped ring |
+| `mirror [--pr N]` | orchestrator | prune the cache + re-project labels (one-way) |
+| `rebuild [--release-pr N]` | orchestrator | cold-start: reconstruct the cache from GitHub |
+| `lock` / `unlock` | orchestrator | advisory single-writer lock for this checkout |
 
 ## Batch economy — the prime directive (ENFORCED)
 
@@ -89,8 +104,8 @@ The builder enforces the per-issue side (fast gates only, commit to the batch br
 1. **Working tree clean?** `git status --porcelain`. Dirty → exit (another session owns this tree). Don't stash/switch.
 2. **On `<MAIN_BRANCH>`, current?** `git fetch origin && git checkout <MAIN_BRANCH> && git pull --ff-only`. FF fails → exit + report.
 3. **Lock check.** `.claude/state/autoloop.lock` mtime < 10 min ⇒ another firing is running → exit. Else touch it.
-4. **Read the work queue.** Create from `work-queue-template.json` if absent. Seed `started`/`last_invocation`.
-5. **Fold in any background Verify result.** If `.claude/state/verify-result.json` exists, the background agent finished: copy its `{sha, status, detail, verified_at}` into `verify_state` (you are the single writer of the shared queue's `verify_state`), then **delete the result file**. If `verify_state.status == "verifying"` but no result file exists and `since` is >20 min old, the agent died — reset `verify_state.status` to `"owed"` so it relaunches.
+4. **Read status:** `queue.py summary` (compact — batch, verify, gh label counts). On a cold start (no cache), `queue.py rebuild --release-pr <n>` reconstructs it from GitHub. `queue.py mirror` prunes the cache + re-projects labels (pruning is code-enforced, not hand-done).
+5. **Fold in any background Verify result.** If `.claude/state/verify-result.json` exists, the background agent finished: fold it in with `queue.py verify-set <sha> <status> --detail <…> [--pr <release-pr>]`, then **delete the result file**. `queue.py verify-get` auto-resets a `verifying` entry stuck >20 min (the agent died → relaunch).
 6. **Release gate** (`<RELEASE_FLOW>`):
    - release-please → `gh pr list --head <release-branch> --state open`. If open:
      - **Mirror `verify_state` onto the release PR as a label** (labels only — release-please owns the PR body): `owed`/`verifying` → ensure `autoloop:verify-pending`; `red` → ensure `autoloop:verify-failed`; `green`/`null` → remove both. Swap, don't stack.
@@ -119,8 +134,8 @@ Foreground (Planner / Builder) prompt — they read & write the shared queue:
 ```
 Read .claude/skills/autoloop-issues/stages/<planner|builder>.md and follow it exactly.
 Context for this run: <unit id / batch state to act on>.
-The shared queue is .claude/state/work-queue.json — read it, write results back (unit status,
-completed/review/needs_refinement/…, set verify_state=owed at seal), and return ONE line:
+Touch state ONLY via `queue.py` verbs (claim/built/batch/verify-set/park/note — see the verb table);
+never read or write the cache file directly. Return ONE line:
 what you did + the mutations you made. Do not narrate.
 ```
 
@@ -133,7 +148,7 @@ Do NOT write .claude/state/work-queue.json. Write your verdict to .claude/state/
 Return ONE line: the verdict + any revert PR you opened. Do not narrate.
 ```
 
-Builder mode (`build` vs `seal`) and the unit `gate`/`security` go in the context line. After a **foreground** agent returns: **re-read `work-queue.json`** (the file is authoritative, not the summary), append the one-liner to your tally, go back to Step 1. The **background** Verify does not block — proceed immediately; its result is folded in at the next preflight (Step 0 fold-in), and the harness re-invokes the loop when it completes.
+Builder mode (`build` vs `seal`) and the unit `gate`/`security` go in the context line. After a **foreground** agent returns: **re-read status via `queue.py summary`** (state is authoritative, not the agent's summary line), append the one-liner to your tally, go back to Step 1. The **background** Verify does not block — proceed immediately; its result is folded in at the next preflight (Step 0 fold-in), and the harness re-invokes the loop when it completes.
 
 ### Model per stage — match the model to the cost of being wrong
 
@@ -160,6 +175,10 @@ Pass the same `/loop /autoloop-issues` input back. Don't nap between dispatches 
 ## Comment hygiene
 
 Every comment any stage posts is attributable as agent-authored per the project's convention (an AI marker if the agent posts as a human account), and stays short and sharp. **No stage ever replies to an external human commenter** — those tickets are parked on `awaiting_user[]` for a human-confirmed reply.
+
+## State hygiene (enforced in code by `queue.py`)
+
+You don't hand-prune anything — `queue.py` enforces it on every write: the `notes` ring is capped (~15, run-scoped scratch), `done`/shipped units are dropped (`batch reset` clears a released batch), and the cache never carries a schema or long prose. The durable record of shipped work is GitHub (closed issues + merged PRs) + git history, so there is nothing to accumulate locally. Call `queue.py mirror` at preflight to prune + re-project labels one-way. This is the whole reason state is split: the local cache stays a few KB and cheap to touch, while everything durable — and everything that must be consistent across concurrent instances — lives in GitHub.
 
 ## End-of-firing summary
 
@@ -195,5 +214,5 @@ The **Needs refinement** line is the point of the pipeline.
 - Reply to external human commenters.
 
 ## Reference
-- Stages: `stages/planner.md`, `stages/builder.md`, `stages/verify.md` (this dir; Verify runs in the background and writes `.claude/state/verify-result.json`). Queue schema: `work-queue-template.json`.
+- Stages: `stages/planner.md`, `stages/builder.md`, `stages/verify.md` (this dir; Verify runs in the background and writes `.claude/state/verify-result.json`). State broker: `queue.py` (verbs + `selftest`); cache shape: `work-queue-template.json`.
 - Worked example: `mdopp/servicebay` (`.claude/skills/autoloop-issues/`) — its Verify stage is `box-verify.md` (a `:dev`/`:latest` channel flip).

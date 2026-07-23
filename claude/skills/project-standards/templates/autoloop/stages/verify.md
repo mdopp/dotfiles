@@ -5,7 +5,7 @@ You are the **Verify** sub-agent. You run **in the background** (the orchestrato
 
 Read first: the orchestrator's shared rules in `.claude/skills/autoloop-issues/SKILL.md`.
 
-**You do NOT touch `.claude/state/work-queue.json`.** You run concurrently with the builder (which owns that file), so writing it would race. Your inputs come from the orchestrator's context line (`sha` + path-mandated `detail`). Your **only** output is `.claude/state/verify-result.json`:
+**You do NOT touch the `queue.py` cache (`.claude/state/autoloop-cache.json`).** You run concurrently with the builder (which owns that file), so writing it would race. Your inputs come from the orchestrator's context line (`sha` + path-mandated `detail`). Your **only** output is `.claude/state/verify-result.json`:
 ```json
 { "sha": "<merge SHA>", "status": "green" | "red" | "owed", "detail": "<which paths / why>", "verified_at": "<iso8601>" }
 ```
@@ -33,7 +33,7 @@ If the environment is unreachable / can't verify this run, do **not** silently d
 `Verify: green @ a1b2c3d (install/ + portal/); release cleared.` — or `…red, opened revert PR #47, release blocked.` — or `…env unreachable, verify still owed.`
 
 ## Never
-- Write `.claude/state/work-queue.json` — only `.claude/state/verify-result.json` (the builder owns the queue concurrently).
+- Write the `queue.py` cache — only `.claude/state/verify-result.json` (the builder owns state concurrently; the orchestrator folds your result in via `queue.py verify-set`).
 - Leave the environment in the staging/test state — restore on every path including failure/timeout.
 - Merge/ship the release yourself (the orchestrator preflight does, gated on your green).
 - Mask a red verify as green — a real failure blocks the release.
